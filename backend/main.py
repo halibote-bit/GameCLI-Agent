@@ -15,7 +15,7 @@ except ImportError:
     _requests = None
 
 from agent_loop import AgentLoop
-from screen_capture import ScreenCapture
+from screen_capture import ScreenCapture, WindowNotFoundError
 from macro_recorder import recorder
 from memories import MemoryStore
 
@@ -86,8 +86,15 @@ class PreviewRequest(BaseModel):
 @app.post("/api/preview")
 def get_preview(req: PreviewRequest):
     try:
-        capture_result = screen_capture.capture(req.target_type, req.target_name)
+        # strict=True: fail loudly when the target window is gone instead of
+        # silently returning a full-screen screenshot of the wrong content.
+        capture_result = screen_capture.capture(req.target_type, req.target_name, strict=True)
         return {"image": capture_result["image"]}
+    except WindowNotFoundError as e:
+        return JSONResponse(
+            status_code=404,
+            content={"error": str(e), "code": "window_not_found"},
+        )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

@@ -14,6 +14,21 @@ NORM_WIDTH  = 1280
 NORM_HEIGHT = 720
 
 
+class WindowNotFoundError(Exception):
+    """Raised when a window target cannot be found on screen.
+
+    Typically happens when the window was closed or its title changed
+    after the frontend captured the window list.
+    """
+
+
+def _window_not_found_error(target_name: str) -> WindowNotFoundError:
+    return WindowNotFoundError(
+        f"Window not found: '{target_name}'. It may have been closed or "
+        f"renamed. Click Refresh next to Target Name to update the window list."
+    )
+
+
 class ScreenCapture:
     def __init__(self):
         pass  # No shared mss state — created per call for thread safety
@@ -52,17 +67,30 @@ class ScreenCapture:
                 
         return sources
 
-    def capture(self, target_type: str, target_name: str) -> dict:
+    @staticmethod
+    def _find_window(target_name: str):
+        """Return the first window whose title contains *target_name*,
+        or None if no window matches (closed / renamed / not enumerable)."""
+        wins = gw.getWindowsWithTitle(target_name)
+        return wins[0] if wins else None
+
+    def capture(self, target_type: str, target_name: str, strict: bool = False) -> dict:
         """
         Captures the screen and returns a dict with:
           - "image": base64 encoded JPEG image
           - "offset_x": left edge of capture region in absolute screen coords
           - "offset_y": top edge of capture region in absolute screen coords
           - "scale": ratio of original_size / thumbnail_size (>=1.0)
+
+        When *strict* is True and the window target cannot be found,
+        raises WindowNotFoundError instead of silently falling back to
+        the whole primary monitor. Used by the preview endpoint so the
+        UI can tell the user the target is gone instead of showing a
+        misleading full-screen screenshot.
         """
         with mss.mss() as sct:
             monitor_dict = None
-            
+
             if target_type == "monitor":
                 try:
                     mon_idx = int(target_name.replace("Monitor ", ""))
@@ -70,17 +98,17 @@ class ScreenCapture:
                 except Exception as e:
                     print(f"Error finding monitor: {e}")
                     monitor_dict = sct.monitors[1] # fallback to primary
-                    
+
             elif target_type == "window":
-                try:
-                    win = gw.getWindowsWithTitle(target_name)[0]
+                win = self._find_window(target_name)
+                if win is not None:
                     # Check if it's minimized
                     if win.isMinimized:
                         win.restore()
                     # Bring to front
                     try:
                         win.activate()
-                    except:
+                    except Exception:
                         pass
                     monitor_dict = {
                         "top": win.top,
@@ -88,10 +116,13 @@ class ScreenCapture:
                         "width": win.width,
                         "height": win.height
                     }
-                except Exception as e:
-                    print(f"Error finding window: {e}")
-                    monitor_dict = sct.monitors[1] # fallback
-                    
+                elif strict:
+                    raise _window_not_found_error(target_name)
+                else:
+                    # Legacy fallback for the running agent loop — keep
+                    # capturing something rather than crashing the session.
+                    monitor_dict = sct.monitors[1]
+
             if monitor_dict is None:
                 monitor_dict = sct.monitors[1]
 

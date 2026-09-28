@@ -34,6 +34,7 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [logs, setLogs] = useState([]);
   const [previewSrc, setPreviewSrc] = useState(null);
+  const [previewError, setPreviewError] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [sessionCost, setSessionCost] = useState(null);
   const [isRecordingMacro, setIsRecordingMacro] = useState(false);
@@ -50,6 +51,8 @@ function App() {
   const logsEndRef = useRef(null);
   const previewIntervalRef = useRef(null);
   const costIntervalRef = useRef(null);
+  // Guard so a stale window list is auto-refreshed at most once per target
+  const autoRefreshedSourcesRef = useRef(false);
   const providerInfo = PROVIDERS.find(p => p.id === provider);
 
   useEffect(() => {
@@ -147,6 +150,12 @@ function App() {
     };
   }, [targetType, targetName, isRunning]);
 
+  // Allow one automatic sources refresh per target selection
+  useEffect(() => {
+    autoRefreshedSourcesRef.current = false;
+    setPreviewError(null);
+  }, [targetType, targetName]);
+
   const fetchPreview = useCallback(async () => {
     if (!targetName) return;
     setPreviewLoading(true);
@@ -156,12 +165,29 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_type: targetType, target_name: targetName })
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Surface capture errors instead of silently keeping the stale image
+        setPreviewError(data.error || `HTTP ${res.status}`);
+        if (data.code === 'window_not_found') {
+          // The stale image shows the wrong target — remove it
+          setPreviewSrc(null);
+          // A stale window list is the most likely cause; refresh it once
+          if (!autoRefreshedSourcesRef.current) {
+            autoRefreshedSourcesRef.current = true;
+            fetchSources();
+          }
+        }
+        return;
+      }
+      autoRefreshedSourcesRef.current = false;
+      setPreviewError(null);
       if (data.image) {
         setPreviewSrc(`data:image/jpeg;base64,${data.image}`);
       }
     } catch (e) {
       console.error("Failed to fetch preview", e);
+      setPreviewError(`Cannot reach the backend: ${e.message}`);
     } finally {
       setPreviewLoading(false);
     }
@@ -172,10 +198,11 @@ function App() {
       const res = await fetch('http://localhost:8000/api/sources');
       const data = await res.json();
       setSources(data);
-      if (data.monitors.length > 0 && targetType === 'monitor') {
-        setTargetName(data.monitors[0]);
-      } else if (data.windows.length > 0 && targetType === 'window') {
-        setTargetName(data.windows[0]);
+      // Keep the user's current selection if it still exists in the fresh
+      // list; only fall back to the first entry when it disappeared.
+      const list = targetType === 'window' ? data.windows : data.monitors;
+      if (list.length > 0 && !list.includes(targetName)) {
+        setTargetName(list[0]);
       }
     } catch (e) {
       console.error("Failed to fetch sources", e);
@@ -717,9 +744,15 @@ function App() {
                 </button>
               </h2>
               <div className="preview-container">
-                {previewSrc 
+                {previewError && (
+                  <div className="preview-error">
+                    <strong>Capture failed</strong>
+                    <div>{previewError}</div>
+                  </div>
+                )}
+                {previewSrc
                   ? <img src={previewSrc} alt="Screen Preview" className="preview-img" />
-                  : <div className="preview-placeholder">No preview available. Select a target and click Refresh.</div>
+                  : !previewError && <div className="preview-placeholder">No preview available. Select a target and click Refresh.</div>
                 }
               </div>
             </div>
@@ -916,9 +949,15 @@ function App() {
       <div className="running-content">
         {/* Screen preview takes main focus */}
         <div className="running-preview">
+          {previewError && (
+            <div className="preview-error">
+              <strong>Capture failed</strong>
+              <div>{previewError}</div>
+            </div>
+          )}
           {previewSrc 
             ? <img src={previewSrc} alt="Screen Preview" className="running-preview-img" />
-            : <div className="preview-placeholder">Waiting for screen capture...</div>
+            : !previewError && <div className="preview-placeholder">Waiting for screen capture...</div>
           }
         </div>
 
